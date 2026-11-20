@@ -1,0 +1,6 @@
+opencv-python-headless>=4.8,<6
+numpy>=1.24
+pillow>=10.0
+onnxruntime>=1.16
+rapidocr-onnxruntime>=1.2.3,<2
+python-telegram-bot>=21.0,<23
