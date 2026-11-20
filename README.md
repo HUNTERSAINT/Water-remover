@@ -44,7 +44,7 @@ Uses Telegram **long polling**, so no public URL or webhook is needed.
 Run **only one instance** per bot token (two pollers conflict).
 
 ### Resources
-* Default (OpenCV), measured: ~315 MB RAM peak and ~7 s for a 720x958 image (several OCR passes); ~650 MB peak and ~10-15 s for a
+* Default (OpenCV), measured: ~315 MB RAM peak and ~7 s for a 720x958 image (several OCR passes); ~900 MB peak and ~9 s for a
   12-megapixel photo (2 CPU cores). On small plans lower `MAX_MEGAPIXELS` and `MAX_CONCURRENT_JOBS`.
 * `USE_LAMA=true`: much better on watermarks crossing edges, but expects 1.5 GB+ RAM and downloads the
   model on first start. If the model can't load, the bot silently uses OpenCV.
