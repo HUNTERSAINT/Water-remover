@@ -37,7 +37,6 @@ def region_mask(
     region: TextRegion | None = None,
     box: tuple[int, int, int, int] | None = None,
     strength: float = 1.0,
-    fill_if_empty: bool = False,
 ) -> np.ndarray:
     """Return a full-size uint8 mask (255 = remove) for one region or box."""
     h_img, w_img = gray.shape[:2]
@@ -46,7 +45,7 @@ def region_mask(
         box = region.box
     assert box is not None
     x0, y0, x1, y1 = box
-    th = max(6, y1 - y0)
+    th = max(6, y1 - y0) if region is not None else 24   # box mode: assume ordinary letter size
     pad = int(th * 0.30) + 3
     X0, Y0 = max(0, x0 - pad), max(0, y0 - pad)
     X1, Y1 = min(w_img, x1 + pad), min(h_img, y1 + pad)
@@ -65,16 +64,21 @@ def region_mask(
         keep[:] = True
         ksizes = [9, 17, 31]
 
-    m = _stroke_mask(crop, ksizes, keep)
-
-    area = max(1, int(keep.sum()))
-    if m.sum() / 255 < 0.015 * area:
-        m[:] = 0
-        if region is not None or fill_if_empty:
-            if region is not None:
-                cv2.fillPoly(m, [poly], 255)
-            else:
-                m[:] = 255
+    if region is not None:
+        m = _stroke_mask(crop, ksizes, keep)
+        area = max(1, int(keep.sum()))
+        if m.sum() / 255 < 0.015 * area:        # no usable strokes: cover the text box
+            m[:] = 0
+            cv2.fillPoly(m, [poly], 255)
+    else:
+        # Hand-marked area with no readable text: take only the strongest thin
+        # marks (never the whole rectangle) so the picture is not wiped out.
+        resp = np.zeros_like(crop)
+        for k in ksizes:
+            resp = np.maximum(resp, stroke_response(crop, _odd(k)))
+        thr = max(6.0, float(np.percentile(resp, 94)))
+        m = (resp > thr).astype(np.uint8) * 255
+        m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))   # drop speckle
 
     d = 2 * max(1, int(round(th * 0.035 * strength))) + 1
     m = cv2.dilate(m, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (d, d)))
@@ -93,5 +97,5 @@ def build_mask(
     for r in regions:
         mask = np.maximum(mask, region_mask(gray, region=r, strength=strength))
     for b in manual_boxes or []:
-        mask = np.maximum(mask, region_mask(gray, box=b, strength=strength, fill_if_empty=True))
+        mask = np.maximum(mask, region_mask(gray, box=b, strength=strength))
     return mask

@@ -53,3 +53,13 @@ def test_fallback_to_opencv_when_primary_crashes():
     fb = FallbackInpainter(Boom())
     out = fb.inpaint(img, mask)
     assert fb.name == "opencv" and out.shape == img.shape
+
+
+def test_lama_self_test_accepts_good_model_and_rejects_bad_one(tmp_path):
+    good = tmp_path / "good.onnx"; _fake_model(good)
+    assert LamaInpainter(good).self_test() is True
+
+    class Swapped(LamaInpainter):                      # simulates wrong channel order
+        def _run(self, crop_bgr, crop_mask):
+            return super()._run(crop_bgr, crop_mask)[:, :, ::-1]
+    assert Swapped(good).self_test() is False

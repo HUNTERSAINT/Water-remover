@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
-from telegram.error import TelegramError
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
     Application, ApplicationBuilder, CallbackQueryHandler, CommandHandler,
     ContextTypes, MessageHandler, filters,
@@ -43,6 +43,23 @@ class Session:
 
 
 # ----------------------------------------------------------------- helpers
+async def _edit(msg, text: str, **kw):
+    """edit_text that tolerates Telegram's 'message is not modified' error."""
+    try:
+        return await msg.edit_text(text, **kw)
+    except BadRequest as exc:
+        if "not modified" not in str(exc).lower():
+            raise
+
+
+async def _edit_markup(msg, markup):
+    try:
+        return await msg.edit_reply_markup(markup)
+    except BadRequest as exc:
+        if "not modified" not in str(exc).lower():
+            raise
+
+
 def _state(ctx: ContextTypes.DEFAULT_TYPE) -> dict:
     return ctx.application.bot_data
 
@@ -86,7 +103,7 @@ def _region_keyboard(session: Session) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-def _grid_keyboard(session: Session, cols: int = 4, rows_n: int = 4) -> InlineKeyboardMarkup:
+def _grid_keyboard(session: Session, cols: int = 6, rows_n: int = 6) -> InlineKeyboardMarkup:
     rows = []
     for r in range(rows_n):
         rows.append([
@@ -112,6 +129,8 @@ def _result_keyboard(session: Session) -> InlineKeyboardMarkup:
 
 def _caption(outcome: pipeline.Outcome, left_alone: int) -> str:
     lines = [f"✅ Done! Removed {outcome.regions_removed} watermark area(s)."]
+    if outcome.approximate:
+        lines.append("⚠️ I couldn't find readable letters in the area you marked, so that part is an approximation.")
     if outcome.traces_may_remain:
         lines.append("⚠️ Faint traces may remain. Tap Retry (stronger) if you can see them.")
     if left_alone:
@@ -177,19 +196,19 @@ async def on_image(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         del data
     except image_receiver.ImageError as exc:
         _drop(ctx, user.id)
-        await status.edit_text(f"⚠️ {exc}")
+        await _edit(status, f"⚠️ {exc}")
         return
     except Cancelled:
-        await status.edit_text("🛑 Cancelled.")
+        await _edit(status, "🛑 Cancelled.")
         return
     except JobTimeout:
         _drop(ctx, user.id)
-        await status.edit_text("⏱️ That took too long and was stopped. Try a smaller image.")
+        await _edit(status, "⏱️ That took too long and was stopped. Try a smaller image.")
         return
     except Exception:  # noqa: BLE001
         log.exception("Analysis failed")
         _drop(ctx, user.id)
-        await status.edit_text("❌ Something went wrong while analysing that image. Please try again.")
+        await _edit(status, "❌ Something went wrong while analysing that image. Please try again.")
         return
 
     if _sessions(ctx).get(user.id) is not placeholder:      # cancelled meanwhile
@@ -203,10 +222,10 @@ async def on_image(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if det.watermarks:
         await _process(update, ctx, session, status, pipeline.Options())
     elif det.uncertain:
-        await status.edit_text("🤔 I found some text but I'm not sure it's a watermark. Nothing was changed yet.")
+        await _edit(status, "🤔 I found some text but I'm not sure it's a watermark. Nothing was changed yet.")
         await _send_review(msg, ctx, session)
     else:
-        await status.edit_text(
+        await _edit(status, 
             "🔍 I couldn't find any text watermark. If there's a logo or mark, "
             "tap Mark area and select where it is.",
             reply_markup=InlineKeyboardMarkup([[
@@ -232,7 +251,7 @@ async def _process(update, ctx, session: Session, status, options: pipeline.Opti
     session.busy = True
     session.cancel.clear()
     try:
-        await status.edit_text(messages.PROCESSING)
+        await _edit(status, messages.PROCESSING)
         outcome = await _run(
             ctx, session, pipeline.remove, session.analysis, options,
             _state(ctx)["inpainter"], cfg, session.cancel,
@@ -246,17 +265,17 @@ async def _process(update, ctx, session: Session, status, options: pipeline.Opti
         await status.delete()
     except Cancelled:
         try:
-            await status.edit_text("🛑 Cancelled.")
+            await _edit(status, "🛑 Cancelled.")
         except TelegramError:
             pass
     except JobTimeout:
-        await status.edit_text("⏱️ Processing took too long and was stopped.")
+        await _edit(status, "⏱️ Processing took too long and was stopped.")
     except ValueError:
-        await status.edit_text("⚠️ There was nothing selected to remove.")
+        await _edit(status, "⚠️ There was nothing selected to remove.")
     except Exception:  # noqa: BLE001
         log.exception("Removal failed")
         try:
-            await status.edit_text("❌ Something went wrong while processing. Please try again.")
+            await _edit(status, "❌ Something went wrong while processing. Please try again.")
         except TelegramError:
             pass
     finally:
@@ -280,7 +299,7 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         _drop(ctx, q.from_user.id)
         await q.answer("Discarded")
         try:
-            await q.edit_message_reply_markup(None)
+            await _edit_markup(q.message, None)
         except TelegramError:
             pass
         return
@@ -289,7 +308,7 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         i = int(parts[2])
         session.selected ^= {i}
         await q.answer()
-        await q.edit_message_reply_markup(_region_keyboard(session))
+        await _edit_markup(q.message, _region_keyboard(session))
         return
 
     if action == "rv":
@@ -302,7 +321,7 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.answer()
         await q.message.reply_photo(
             pipeline.grid_preview(session.analysis, session.cells),
-            caption="✏️ Tap the squares that cover the watermark (pick as few as possible), then Remove.",
+            caption="✏️ Tap the squares that cover the watermark (as few as possible, just the area around the text), then Remove.",
             reply_markup=_grid_keyboard(session),
         )
         return
@@ -310,7 +329,7 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if action == "c":
         session.cells ^= {int(parts[2])}
         await q.answer()
-        await q.edit_message_reply_markup(_grid_keyboard(session))
+        await _edit_markup(q.message, _grid_keyboard(session))
         return
 
     status = await q.message.reply_text(messages.PROCESSING)
@@ -323,7 +342,7 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await _process(update, ctx, session, status, pipeline.Options(selected=chosen))
     elif action == "mg":
         if not session.cells:
-            await status.edit_text("Please tap at least one square first.")
+            await _edit(status, "Please tap at least one square first.")
             return
         boxes = pipeline.grid_boxes(session.analysis.loaded.size)
         await _process(update, ctx, session, status, pipeline.Options(

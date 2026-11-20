@@ -9,7 +9,7 @@ API keys other than your Telegram bot token.
 | Stage | File | What it does |
 |---|---|---|
 | Receive | `image_receiver.py` | Validates type/size/pixels, decodes safely, fixes EXIF rotation, auto-crops flat black screenshot bars (e.g. Jiji/gallery screenshots) |
-| Detect | `watermark_detector.py` | RapidOCR (PaddleOCR models on onnxruntime, CPU). A second pass on a contrast-boosted copy finds faint overlays. Each text box is scored: faint strokes, watermark wording (jiji, posted on, www, ©...), repeated text, overlay-sized text → **watermark / uncertain / protected** |
+| Detect | `watermark_detector.py` | RapidOCR (PaddleOCR models on onnxruntime, CPU). Several passes (plain, contrast-boosted, 2x/3x upscaled for small images) find faint overlays; fragments on one line are merged, and a more sensitive search above/below each confirmed line finds stacked lines such as "POSTED ON ..." over a shop name. Each text box is scored: faint strokes, watermark wording (jiji, posted on, www, ©...), repeated text, overlay-sized text → **watermark / uncertain / protected**. Faint strokes alone are never enough to delete something automatically |
 | Mask | `mask_generator.py` | Follows only the letter strokes (top-hat/black-hat), grown a few pixels. Not a rectangle |
 | Inpaint | `image_inpainting.py` | LaMa (optional) or OpenCV Telea+Navier-Stokes with grain re-injection. Auto-fallback to OpenCV on any failure |
 | Verify/encode | `image_optimizer.py` | Confirms nothing outside the mask changed, estimates leftover traces, re-encodes in the original format at high quality |
@@ -17,7 +17,7 @@ API keys other than your Telegram bot token.
 
 **Protected text:** crisp, high-contrast print (product labels, serial numbers, the 1/2 · 1/4 measurement
 numbers) is never removed automatically. Borderline text is *not touched*; the bot shows a numbered
-preview and asks you to confirm. If nothing is found you can pick the area on a 4x4 grid.
+preview and asks you to confirm. If nothing is found you can pick the area on a 6x6 grid; the bot then searches that area for faint text and removes only the letters, never the whole squares.
 
 ## Bot commands
 `/start` `/help` `/about` `/cancel`. After each result: **Retry (stronger)**, **Review text areas**, **Done**.
@@ -44,7 +44,7 @@ Uses Telegram **long polling**, so no public URL or webhook is needed.
 Run **only one instance** per bot token (two pollers conflict).
 
 ### Resources
-* Default (OpenCV), measured: ~315 MB RAM peak and ~2 s for a 720x958 image; ~650 MB peak and ~8 s for a
+* Default (OpenCV), measured: ~315 MB RAM peak and ~7 s for a 720x958 image (several OCR passes); ~650 MB peak and ~10-15 s for a
   12-megapixel photo (2 CPU cores). On small plans lower `MAX_MEGAPIXELS` and `MAX_CONCURRENT_JOBS`.
 * `USE_LAMA=true`: much better on watermarks crossing edges, but expects 1.5 GB+ RAM and downloads the
   model on first start. If the model can't load, the bot silently uses OpenCV.
@@ -57,7 +57,7 @@ See `.env.example`. Only `TELEGRAM_BOT_TOKEN` is required. Secrets are never log
 pip install -r requirements-dev.txt
 pytest -q
 ```
-27 tests: input validation (corrupt/oversized/wrong type), crop logic, detection (watermark found,
+34 tests: input validation (corrupt/oversized/wrong type), crop logic, detection (watermark found,
 serial-number label protected), removal quality (error inside the mask drops by >65%, bytes outside the
 mask identical), all three formats and dimensions, LaMa plumbing with a stand-in model, OpenCV fallback,
 and the full Telegram flow with a mocked transport (receive → analyse → process → document returned,

@@ -42,6 +42,7 @@ class Outcome:
     report: dict
     regions_removed: int
     traces_may_remain: bool
+    approximate: bool = False
 
 
 def analyse(data: bytes, cfg: Settings, cancel: threading.Event | None = None) -> Analysis:
@@ -72,8 +73,19 @@ def remove(
         raise ValueError("nothing selected")
 
     _check(cancel)
+    # Hand-marked areas: look for real text inside them first.
+    targets = list(targets)
+    fallback_boxes: list[Box] = []
+    for box in _merge_touching(options.manual_boxes):
+        found = watermark_detector.detect_in_box(loaded.bgr, box, cfg.ocr_max_side)
+        usable = [r for r in found.regions if _manual_ok(r, box, det.regions)]
+        if usable:
+            targets += usable
+        else:
+            fallback_boxes.append(box)
+        _check(cancel)
     mask = mask_generator.build_mask(
-        loaded.bgr, targets, options.manual_boxes, strength=options.strength
+        loaded.bgr, targets, fallback_boxes, strength=options.strength
     )
     if not mask.any():
         raise ValueError("empty mask")
@@ -88,12 +100,10 @@ def remove(
     _check(cancel)
     data, ext, mime = image_optimizer.encode(result, loaded, cfg.output_quality)
     traces = report["residual_ratio"] > 0.5
-    log.info("Removed %d regions with %s: %s", len(targets) + len(options.manual_boxes),
-             inpainter.name, report)
-    return Outcome(
-        data, ext, mime, inpainter.name, report,
-        len(targets) + len(options.manual_boxes), traces,
-    )
+    count = len(targets) + len(fallback_boxes)
+    log.info("Removed %d regions with %s: %s", count, inpainter.name, report)
+    return Outcome(data, ext, mime, inpainter.name, report, count, traces,
+                   approximate=bool(fallback_boxes))
 
 
 def annotated_preview(analysis: Analysis, selected_ids: set[int] | None = None,
@@ -126,7 +136,37 @@ def annotated_preview(analysis: Analysis, selected_ids: set[int] | None = None,
     return buf.tobytes() if ok else b""
 
 
-def grid_boxes(size: tuple[int, int], cols: int = 4, rows: int = 4) -> list[Box]:
+def _manual_ok(r: TextRegion, box: Box, global_regions: list[TextRegion]) -> bool:
+    """Text found inside a hand-marked area. Mostly inside the marked area, never
+    crisp print, and never something the full-image pass already ruled protected."""
+    if watermark_detector._overlap_frac(r.box, box) < 0.6 or r.contrast > 85:
+        return False
+    best = max(global_regions, key=lambda g: watermark_detector._iou(r.box, g.box), default=None)
+    if best is not None and watermark_detector._iou(r.box, best.box) > 0.3:
+        return best.kind != watermark_detector.PROTECTED
+    return r.contrast <= 55            # new faint text the full pass could not read
+
+
+def _merge_touching(boxes: list[Box]) -> list[Box]:
+    """Join grid cells that touch or overlap so text spanning cells is searched whole."""
+    boxes = [tuple(b) for b in boxes]
+    merged = True
+    while merged:
+        merged = False
+        for i in range(len(boxes)):
+            for j in range(i + 1, len(boxes)):
+                a, b = boxes[i], boxes[j]
+                if a[0] <= b[2] and b[0] <= a[2] and a[1] <= b[3] and b[1] <= a[3]:
+                    boxes[i] = (min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3]))
+                    del boxes[j]
+                    merged = True
+                    break
+            if merged:
+                break
+    return boxes
+
+
+def grid_boxes(size: tuple[int, int], cols: int = 6, rows: int = 6) -> list[Box]:
     w, h = size
     out = []
     for r in range(rows):
@@ -140,7 +180,7 @@ def _check(cancel: threading.Event | None) -> None:
         raise Cancelled()
 
 
-def grid_preview(analysis: Analysis, selected: set[int], cols: int = 4, rows: int = 4,
+def grid_preview(analysis: Analysis, selected: set[int], cols: int = 6, rows: int = 6,
                  max_side: int = 1280) -> bytes:
     """Image with a numbered grid; selected cells are tinted green."""
     img = analysis.loaded.bgr.copy()
@@ -153,10 +193,10 @@ def grid_preview(analysis: Analysis, selected: set[int], cols: int = 4, rows: in
     img = cv2.addWeighted(overlay, 0.3, img, 0.7, 0)
     for i, (x0, y0, x1, y1) in enumerate(grid_boxes((w, h), cols, rows), 1):
         cv2.rectangle(img, (x0, y0), (x1, y1), (255, 255, 255), max(1, int(s)))
-        cv2.putText(img, str(i), (x0 + 8, y0 + int(34 * s)), cv2.FONT_HERSHEY_SIMPLEX,
-                    1.0 * s, (0, 0, 0), max(3, int(4 * s)), cv2.LINE_AA)
-        cv2.putText(img, str(i), (x0 + 8, y0 + int(34 * s)), cv2.FONT_HERSHEY_SIMPLEX,
-                    1.0 * s, (255, 255, 255), max(1, int(2 * s)), cv2.LINE_AA)
+        cv2.putText(img, str(i), (x0 + 6, y0 + int(26 * s)), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7 * s, (0, 0, 0), max(3, int(3 * s)), cv2.LINE_AA)
+        cv2.putText(img, str(i), (x0 + 6, y0 + int(26 * s)), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7 * s, (255, 255, 255), max(1, int(2 * s)), cv2.LINE_AA)
     sc = min(1.0, max_side / float(max(h, w)))
     if sc < 1.0:
         img = cv2.resize(img, None, fx=sc, fy=sc, interpolation=cv2.INTER_AREA)

@@ -123,6 +123,26 @@ class LamaInpainter:
         out = cv2.resize(out, (w, h), interpolation=cv2.INTER_CUBIC)
         return cv2.cvtColor(out, cv2.COLOR_RGB2BGR)
 
+    def self_test(self) -> bool:
+        """Run a synthetic image through the model. A correct LaMa export returns the
+        unmasked area (almost) unchanged; wrong channel order or value range does not.
+        This protects against shipping a model whose I/O conventions differ."""
+        try:
+            yy, xx = np.mgrid[0:self.SIZE, 0:self.SIZE].astype(np.float32)
+            img = np.stack([40 + xx / 3, 200 - yy / 3, 90 + (xx + yy) / 8], axis=2)
+            img = np.clip(img, 0, 255).astype(np.uint8)
+            mask = np.zeros((self.SIZE, self.SIZE), np.uint8)
+            mask[200:312, 200:312] = 255
+            out = self._run(img, mask)
+            keep = mask == 0
+            mae = float(np.abs(out.astype(np.int16) - img.astype(np.int16))[keep].mean())
+            ok = mae < 10.0
+            log.info("LaMa self-test: unmasked MAE %.2f -> %s", mae, "ok" if ok else "REJECTED")
+            return ok
+        except Exception as exc:  # noqa: BLE001
+            log.warning("LaMa self-test failed (%s)", exc)
+            return False
+
     def inpaint(self, bgr, mask, cancel: threading.Event | None = None) -> np.ndarray:
         h, w = mask.shape
         result = bgr.copy()
@@ -163,8 +183,10 @@ def make_inpainter(use_lama: bool, model_path: Path, model_url: str):
         try:
             if ensure_model(model_path, model_url):
                 inp = LamaInpainter(model_path)
-                log.info("Using LaMa inpainting")
-                return inp
+                if inp.self_test():
+                    log.info("Using LaMa inpainting")
+                    return inp
+                log.warning("LaMa model failed its self-test; using OpenCV fallback")
         except Exception as exc:  # noqa: BLE001
             log.warning("LaMa unavailable (%s); using OpenCV fallback", exc)
     log.info("Using OpenCV inpainting")
